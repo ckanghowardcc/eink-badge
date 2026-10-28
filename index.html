@@ -1,0 +1,710 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>E Ink Editor</title>
+
+    <style>
+      body {
+        background-color: #f3f0e7;
+        font-family: Cambria, Georgia, serif;
+        padding: 25px;
+        font-size: 16px;
+      }
+
+      h1,
+      h2 {
+        margin-bottom: 5px;
+      }
+
+      h2 {
+        margin-top: 18px;
+      }
+
+      p {
+        margin-top: 5px;
+      }
+
+      button,
+      select,
+      input {
+        font-family: inherit;
+      }
+
+      button {
+        padding: 5px 10px;
+        margin: 5px 5px 10px 0;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.6;
+      }
+
+      .active {
+        background-color: #333;
+        color: white;
+      }
+
+      .workspace {
+        max-width: 800px;
+      }
+
+      .settings {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        margin: 10px 0;
+      }
+
+      .settings label {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+      }
+
+      #drawingCanvas {
+        display: block;
+        width: 100%;
+        max-width: 768px;
+        height: auto;
+        border: 2px solid black;
+        background-color: white;
+        touch-action: none;
+      }
+
+      #textInput {
+        padding: 5px;
+      }
+    </style>
+  </head>
+
+  <body>
+    <h1>Adafruit 3.52" Quad E Ink Editor</h1>
+    <p>By: Caellum K, Dan E, Ronald A</p>
+
+    <div class="workspace">
+      <h2>Choose a Display</h2>
+      <div>
+        <button id="display0" class="displayButton active">Display 1</button>
+        <button id="display1" class="displayButton">Display 2</button>
+        <button id="display2" class="displayButton">Display 3</button>
+      </div>
+
+      <h2>Choose a Tool</h2>
+      <div>
+        <button id="draw" class="toolButton active">Draw</button>
+        <button id="text" class="toolButton">Text</button>
+        <button id="fill" class="toolButton">Fill Canvas</button>
+        <button id="line" class="toolButton">Line</button>
+        <button id="rectangle" class="toolButton">Rectangle</button>
+        <button id="circle" class="toolButton">Circle</button>
+        <button id="erase" class="toolButton">Erase</button>
+        <button id="clear">Clear</button>
+      </div>
+
+      <div class="settings">
+        <label>
+          Color:
+          <select id="colorPicker">
+            <option value="#000000">Black</option>
+            <option value="#ffffff">White</option>
+            <option value="#ffff00">Yellow</option>
+            <option value="#ff0000">Red</option>
+          </select>
+        </label>
+
+        <label>
+          Brush size:
+          <input type="range" id="brushSize" min="1" max="30" value="5" />
+          <span id="brushValue">5</span>
+        </label>
+
+        <label>
+          Text:
+          <input type="text" id="textInput" placeholder="Enter text" />
+        </label>
+      </div>
+
+      <canvas id="drawingCanvas" width="768" height="360"></canvas>
+
+      <div>
+        <button id="undo">Undo</button>
+        <button id="connectSerialButton">Connect to Think Feather</button>
+        <button id="sendDrawingButton" disabled>Send Drawing to Display</button>
+      </div>
+
+      <p id="serialStatus" role="status">Not connected to the Feather.</p>
+    </div>
+    <!--Testing-->
+    <button id="ledOnButton">Turn LED ON</button>
+    <button id="ledOffButton">Turn LED OFF</button>
+    <!--Testing end-->
+    <script>
+      // The physical e-ink display is 384 by 180 pixels.
+      const EINK_WIDTH = 384;
+      const EINK_HEIGHT = 180;
+      const IMAGE_BYTES = (EINK_WIDTH * EINK_HEIGHT) / 4;
+      // This gets the HTML elements (using ID) into the Javascript
+      const canvas = document.getElementById("drawingCanvas");
+      const ctx = canvas.getContext("2d");
+
+      const colorPicker = document.getElementById("colorPicker");
+      const brushSize = document.getElementById("brushSize");
+      const brushValue = document.getElementById("brushValue");
+      const textInput = document.getElementById("textInput");
+      const status = document.getElementById("serialStatus");
+
+      const connectButton = document.getElementById("connectSerialButton");
+      const sendButton = document.getElementById("sendDrawingButton");
+      // These are to track the current state
+      let currentDisplay = 0;
+      let currentTool = "draw";
+      let isDrawing = false;
+      let startX = 0;
+      let startY = 0;
+      let lastX = 0;
+      let lastY = 0;
+      let savedImage = null;
+      //An Array to hold the current images for each of the design
+      let displayImages = [];
+      //This is for the undo so that it can remember
+      let displayHistory = [[], [], []];
+
+      // Serial connection information for the Feather board.
+      let featherPort = null;
+      let serialWriter = null;
+      let serialReader = null;
+      //Initalizing the canvas as a white block
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      // For all the images, it will save the current image (white screen)
+      for (let i = 0; i < 3; i++) {
+        displayImages[i] = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      }
+      // This is just a updating message
+      function setStatus(message) {
+        status.textContent = message;
+      }
+      // This saves the current image that is displayed
+      function saveCurrentImage() {
+        displayImages[currentDisplay] = ctx.getImageData(
+          0,
+          0,
+          canvas.width,
+          canvas.height,
+        );
+      }
+      // This function is used so that it can remember each of the past image
+      function rememberImage() {
+        let history = displayHistory[currentDisplay];
+        // This pushes the snapshot to the end of the array
+        history.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
+        // This removes the oldest one when there are more then 30
+        if (history.length > 30) {
+          history.shift();
+        }
+      }
+
+      // Change between the three separate badge designs.
+      for (let i = 0; i < 3; i++) {
+        document
+          .getElementById("display" + i) //This get the element id for the display with the number i
+          // Chcek for a click
+          .addEventListener("click", function () {
+            if (isDrawing) {
+              // It disable drawing while switching
+              isDrawing = false;
+            }
+
+            saveCurrentImage(); //Saves the image
+            currentDisplay = i; //This sets the current display to the new number
+            ctx.putImageData(displayImages[currentDisplay], 0, 0); //This puts the new display on
+            // For all the screen remove the status active
+            for (let j = 0; j < 3; j++) {
+              document.getElementById("display" + j).classList.remove("active");
+            }
+            //This add the the status active and sets it to the current display
+            this.classList.add("active");
+            // This gives a quick status check
+            setStatus(
+              "Display " +
+                (currentDisplay + 1) +
+                " selected. " +
+                (featherPort
+                  ? "Feather connected."
+                  : "Not connected to the Feather."),
+            );
+          });
+      }
+
+      // Select a drawing tool.
+      const toolNames = [
+        "draw",
+        "text",
+        "fill",
+        "line",
+        "rectangle",
+        "circle",
+        "erase",
+      ];
+      //Loops through the list and checks if button is click
+      for (let i = 0; i < toolNames.length; i++) {
+        document
+          .getElementById(toolNames[i]) //Gets the id
+          // This checks for the click
+          .addEventListener("click", function () {
+            //Changes the selected tool
+            currentTool = toolNames[i];
+            // Like the screen button it will make all other tool inactive and active the one selected
+            for (let j = 0; j < toolNames.length; j++) {
+              document.getElementById(toolNames[j]).classList.remove("active");
+            }
+
+            this.classList.add("active");
+            setStatus(toolNames[i] + " tool selected.");
+          });
+      }
+      //This updates the brushSize. When the slider moves that is an input
+      brushSize.addEventListener("input", function () {
+        brushValue.textContent = brushSize.value;
+      });
+      // This function converts a mouse coordinates into relative coordinates on the canvas
+      function getPosition(event) {
+        let bounds = canvas.getBoundingClientRect(); // Gets the canvas to display position and the size of browser
+        //This calculates the horizontal and vertical so that it scales with the canvas interal dimension
+        return {
+          x: ((event.clientX - bounds.left) * canvas.width) / bounds.width,
+          y: ((event.clientY - bounds.top) * canvas.height) / bounds.height,
+        };
+      }
+      // This function is to set the infomation that will be used when drawing
+      function setDrawingStyle() {
+        if (currentTool === "erase") {
+          //For eraser it makes it white
+          ctx.strokeStyle = "white";
+        } else {
+          ctx.strokeStyle = colorPicker.value; //This set the color of the lines
+        }
+
+        ctx.fillStyle = colorPicker.value; //This sets the fill color
+        ctx.lineWidth = Number(brushSize.value); //This is the width
+        ctx.lineCap = "round"; //So that when the line ends it is rounded
+        ctx.lineJoin = "round"; //Round a corner when two segment meets
+      }
+      //This function is to draw a shape with coordnites x and y
+      function drawShape(x, y) {
+        setDrawingStyle(); //To set the drawing style
+        //If it is a line
+        if (currentTool === "line") {
+          ctx.beginPath(); //Start a drawing path
+          ctx.moveTo(startX, startY); //This moves the drawing to the starting pos
+          ctx.lineTo(x, y); // Defines a line from the starting point to current mouse pos
+          ctx.stroke(); // Draws the line
+          //If it is a rectangle
+        } else if (currentTool === "rectangle") {
+          ctx.strokeRect(startX, startY, x - startX, y - startY); //Make a rectange starting at start to x - the start
+          //If it is a circle selected
+        } else if (currentTool === "circle") {
+          let xDistance = x - startX; // Calculate the horizontal distance
+          let yDistance = y - startY; // Calculates the vertical distance
+          let radius = Math.sqrt(xDistance * xDistance + yDistance * yDistance); //This will calculate the radius
+          ctx.beginPath(); //Begin a new drawing path
+          ctx.arc(startX, startY, radius, 0, Math.PI * 2); //Creates a circle
+          ctx.stroke(); //Draws it on
+        }
+      }
+      // This is the pointer down event and runs when the user presses the canvas
+      canvas.addEventListener("pointerdown", function (event) {
+        //These record the starting position andchecks
+        let position = getPosition(event);
+
+        startX = position.x;
+        startY = position.y;
+        lastX = position.x;
+        lastY = position.y;
+        //Checks which tool is active
+        if (currentTool === "fill") {
+          rememberImage(); //So we can do undo
+
+          //Fills the entire image with a color and saves it
+          ctx.fillStyle = colorPicker.value;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          saveCurrentImage();
+          setStatus("Canvas filled.");
+          return;
+        }
+
+        if (currentTool === "text") {
+          //Get the user text
+          let words = textInput.value.trim();
+          //If there isnt any words ask the user to type first
+          if (words === "") {
+            setStatus("Enter text in the Text field first.");
+            return;
+          }
+          //Save image before changing it
+          rememberImage();
+          //Get the fill style
+          ctx.fillStyle = colorPicker.value;
+          //Make the fond
+          ctx.font =
+            Math.max(12, Number(brushSize.value) * 4) +
+            "px Cambria, Georgia, serif";
+          //Fill the position with the words
+          ctx.fillText(words, position.x, position.y);
+          //Saves it
+          saveCurrentImage();
+          //Output that the text was added
+          setStatus("Text added.");
+          return;
+        }
+        //If all didnt go off
+        rememberImage(); // save image
+        isDrawing = true; // allow drawing
+        savedImage = ctx.getImageData(0, 0, canvas.width, canvas.height); //Capture the current canvas
+        canvas.setPointerCapture(event.pointerId); // This tells the browser to keep sending pointer event even if it moves
+        //This check which tool is selected
+        if (currentTool === "draw" || currentTool === "erase") {
+          setDrawingStyle(); //Apply the drawing style
+          ctx.beginPath(); //Start a new drawing
+          ctx.moveTo(position.x, position.y); //Start the orginal line
+          ctx.lineTo(position.x + 1, position.y + 1); //Draw a small line
+          ctx.stroke(); //Put the line in
+        }
+      });
+      //Look for pointer movement
+      canvas.addEventListener("pointermove", function (event) {
+        //Check if user is drawing
+        if (!isDrawing) {
+          return;
+        }
+        //Gets the pointer position
+        let position = getPosition(event);
+        //If the user selected draw or erase
+        if (currentTool === "draw" || currentTool === "erase") {
+          setDrawingStyle(); //set the drawing style
+          ctx.beginPath(); //Start a new path
+          ctx.moveTo(lastX, lastY); //start of the line
+          ctx.lineTo(position.x, position.y); //End of the line
+          ctx.stroke(); //Draw it
+        } else {
+          //If the other thing didn't happen put the savedimage back and check if you want to draw a shape
+          ctx.putImageData(savedImage, 0, 0);
+          drawShape(position.x, position.y);
+        }
+        // Update hte pointer position
+        lastX = position.x;
+        lastY = position.y;
+      });
+      //To stop the drawing
+      function stopDrawing(event) {
+        if (!isDrawing) {
+          //if is drawing is false return
+          return;
+        }
+        //Get pointer position
+        let position = getPosition(event);
+        //Check wheater a selected tool is a line, rectange, or circle
+        if (
+          currentTool === "line" ||
+          currentTool === "rectangle" ||
+          currentTool === "circle"
+        ) {
+          //Restore the orginal image
+          ctx.putImageData(savedImage, 0, 0);
+          drawShape(position.x, position.y); //Checks if you want to draw a shape
+        }
+
+        isDrawing = false; //Drawing is finished
+        savedImage = null; //Clear temprary refrences
+        saveCurrentImage(); //Save the image
+      }
+
+      canvas.addEventListener("pointerup", stopDrawing); // Call stop drawing when pointer is up
+      canvas.addEventListener("pointercancel", stopDrawing); //Cancel when something interupts
+      // When teh clear button is clicked it sets the canvas to white and save that
+      document.getElementById("clear").addEventListener("click", function () {
+        rememberImage();
+        ctx.fillStyle = "white";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        saveCurrentImage();
+        setStatus("Display " + (currentDisplay + 1) + " cleared.");
+      });
+      //This allows user to reverse an action
+      document.getElementById("undo").addEventListener("click", function () {
+        let history = displayHistory[currentDisplay]; //Hold the undo history for the different displays
+
+        if (history.length === 0) {
+          //if nothing is saved then no history so no undo
+          setStatus("Nothing to undo.");
+          return;
+        }
+        //Retrieves the previous image and restore
+        //Pop removes the last item in an array
+        ctx.putImageData(history.pop(), 0, 0);
+        //Save it and report it.
+        saveCurrentImage();
+        setStatus("Last action undone.");
+      });
+      // THIS IS THE CONNECTING AND EXPORTING PART
+      // Calculate a CRC-16 checksum so the board can check the image data.
+      function crc16(data) {
+        let crc = 0xffff;
+
+        for (let i = 0; i < data.length; i++) {
+          crc = crc ^ data[i];
+
+          for (let bit = 0; bit < 8; bit++) {
+            if (crc & 1) {
+              crc = (crc >>> 1) ^ 0xa001;
+            } else {
+              crc = crc >>> 1;
+            }
+          }
+        }
+
+        return crc & 0xffff;
+      }
+
+      // Turn the canvas into packed 2-bit color data for the e-ink display.
+      // Color numbers: 0 = white, 1 = black, 2 = red, 3 = yellow.
+      function canvasToEinkPixels() {
+        let smallCanvas = document.createElement("canvas");
+        smallCanvas.width = EINK_WIDTH;
+        smallCanvas.height = EINK_HEIGHT;
+
+        let smallContext = smallCanvas.getContext("2d", {
+          willReadFrequently: true,
+        });
+
+        smallContext.fillStyle = "#FFFFFF";
+        smallContext.fillRect(0, 0, EINK_WIDTH, EINK_HEIGHT);
+        smallContext.imageSmoothingEnabled = true;
+        smallContext.drawImage(canvas, 0, 0, EINK_WIDTH, EINK_HEIGHT);
+
+        let rgba = smallContext.getImageData(
+          0,
+          0,
+          EINK_WIDTH,
+          EINK_HEIGHT,
+        ).data;
+
+        let pixels = new Uint8Array(IMAGE_BYTES);
+
+        const palette = [
+          [255, 255, 255], // White
+          [0, 0, 0], // Black
+          [255, 0, 0], // Red
+          [255, 255, 0], // Yellow
+        ];
+
+        for (let i = 0; i < EINK_WIDTH * EINK_HEIGHT; i++) {
+          let offset = i * 4;
+          let red = rgba[offset];
+          let green = rgba[offset + 1];
+          let blue = rgba[offset + 2];
+
+          let closestColor = 0;
+          let closestDistance = Infinity;
+
+          for (let c = 0; c < palette.length; c++) {
+            let redDifference = red - palette[c][0];
+            let greenDifference = green - palette[c][1];
+            let blueDifference = blue - palette[c][2];
+
+            let distance =
+              redDifference * redDifference +
+              greenDifference * greenDifference +
+              blueDifference * blueDifference;
+
+            if (distance < closestDistance) {
+              closestDistance = distance;
+              closestColor = c;
+            }
+          }
+
+          // Store four pixels in each byte, using two bits per pixel.
+          let byteIndex = Math.floor(i / 4);
+          let shift = 6 - (i % 4) * 2;
+          pixels[byteIndex] = pixels[byteIndex] | (closestColor << shift);
+        }
+
+        return pixels;
+      }
+
+      // Ask the browser to connect to the Feather over USB serial.
+      async function connectToFeather() {
+        try {
+          if (!("serial" in navigator)) {
+            throw new Error(
+              "Web Serial is unavailable. Use desktop Chrome or Edge with localhost or HTTPS.",
+            );
+          }
+
+          connectButton.disabled = true;
+          sendButton.disabled = true;
+
+          setStatus("Choose the Feather board in the connection window.");
+
+          featherPort = await navigator.serial.requestPort();
+
+          await featherPort.open({ baudRate: 115200 });
+
+          serialWriter = featherPort.writable.getWriter();
+          serialReader = featherPort.readable.getReader();
+
+          setStatus("Connected! Waiting for the Feather...");
+
+          // Start listening for messages from the Feather.
+          readFeatherMessages();
+        } catch (error) {
+          connectButton.disabled = false;
+          sendButton.disabled = true;
+
+          featherPort = null;
+          serialWriter = null;
+          serialReader = null;
+
+          setStatus("Connection failed: " + error.message);
+          console.error(error);
+        }
+      }
+
+      // Read messages sent back by the Feather.
+      async function readFeatherMessages() {
+        const decoder = new TextDecoder();
+        let leftoverText = "";
+
+        try {
+          while (true) {
+            const result = await serialReader.read();
+
+            if (result.done) {
+              break;
+            }
+
+            leftoverText += decoder.decode(result.value, {
+              stream: true,
+            });
+
+            const lines = leftoverText.split(/\r?\n/);
+            leftoverText = lines.pop() || "";
+
+            for (const line of lines) {
+              const message = line.trim();
+
+              if (message === "") {
+                continue;
+              }
+
+              if (message === "READY") {
+                sendButton.disabled = false;
+                setStatus("Feather ready! You can send your drawing.");
+              } else if (message === "OK IMAGE") {
+                setStatus("Drawing displayed successfully!");
+              } else if (message.startsWith("ERR")) {
+                setStatus("Transfer error: " + message);
+              } else {
+                setStatus("Feather: " + message);
+              }
+            }
+          }
+        } catch (error) {
+          console.error("Serial read error:", error);
+          setStatus("The serial connection was interrupted.");
+        } finally {
+          sendButton.disabled = true;
+          connectButton.disabled = false;
+        }
+      }
+
+      // Send the current canvas to the Feather.
+      async function sendDrawingToFeather() {
+        if (!featherPort || !serialWriter) {
+          setStatus("Connect to the Feather first.");
+          return;
+        }
+
+        sendButton.disabled = true;
+
+        try {
+          saveCurrentImage();
+          setStatus("Converting drawing for the e-ink display...");
+
+          let pixels = canvasToEinkPixels();
+          let checksum = crc16(pixels);
+
+          // The board expects IMG1, then the checksum, then the image data.
+          let packet = new Uint8Array(6 + pixels.length);
+          packet.set([0x49, 0x4d, 0x47, 0x31], 0); // IMG1
+          packet[4] = checksum & 0xff;
+          packet[5] = (checksum >>> 8) & 0xff;
+          packet.set(pixels, 6);
+
+          setStatus("Sending " + packet.length + " bytes to the Feather...");
+
+          // Send smaller pieces of data instead of one large write.
+          const CHUNK_SIZE = 1024;
+
+          for (let offset = 0; offset < packet.length; offset += CHUNK_SIZE) {
+            let end = Math.min(offset + CHUNK_SIZE, packet.length);
+            await serialWriter.write(packet.subarray(offset, end));
+          }
+
+          setStatus(
+            "Image sent. Waiting for the Feather to update the display...",
+          );
+        } catch (error) {
+          setStatus("Could not send the drawing: " + error.message);
+          console.error(error);
+        } finally {
+          sendButton.disabled = !featherPort;
+        }
+      }
+
+      connectButton.addEventListener("click", connectToFeather);
+      sendButton.addEventListener("click", sendDrawingToFeather);
+
+      // Allow the browser to notice if the Feather is unplugged.
+      if ("serial" in navigator) {
+        navigator.serial.addEventListener("disconnect", function (event) {
+          if (event.target === featherPort) {
+            featherPort = null;
+            serialWriter = null;
+            serialReader = null;
+            connectButton.disabled = false;
+            sendButton.disabled = true;
+            setStatus(
+              "Feather disconnected. Connect it again to send a drawing.",
+            );
+          }
+        });
+      }
+
+      document //Test start
+        .getElementById("ledOnButton")
+        .addEventListener("click", async () => {
+          if (!serialWriter) {
+            alert("Connect to the ESP32 first!");
+            return;
+          }
+
+          await serialWriter.write(new TextEncoder().encode("1"));
+        });
+
+      document
+        .getElementById("ledOffButton")
+        .addEventListener("click", async () => {
+          if (!serialWriter) {
+            alert("Connect to the ESP32 first!");
+            return;
+          }
+
+          await serialWriter.write(new TextEncoder().encode("0"));
+        }); //Testing end
+    </script>
+  </body>
+</html>
